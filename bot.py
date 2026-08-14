@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import requests
 import telebot
 from telebot import types
@@ -27,6 +28,42 @@ bot = telebot.TeleBot(TOKEN)
 
 
 # ============================================================
+# UZBEKISTAN PHONE NORMALIZATION
+# ============================================================
+
+def normalize_uz_phone(phone):
+    """
+    Telegram contact quyidagi ko'rinishlarda kelishi mumkin:
+      +998901234567
+      998901234567
+      +998 90 123 45 67
+      998 90 123 45 67
+
+    Natija doim:
+      +998901234567
+
+    Faqat O'zbekiston raqami qabul qilinadi.
+    """
+
+    if not phone:
+        return None
+
+    # Faqat raqam va + belgisini qoldiramiz
+    phone = str(phone).strip()
+    phone = re.sub(r"[^\d+]", "", phone)
+
+    # Telegram ba'zan + belgisiz yuborishi mumkin
+    if phone.startswith("998"):
+        phone = "+" + phone
+
+    # Aynan +998 + 9 ta raqam
+    if not re.fullmatch(r"\+998\d{9}", phone):
+        return None
+
+    return phone
+
+
+# ============================================================
 # START
 # ============================================================
 
@@ -46,8 +83,8 @@ def send_welcome(message):
 
     bot.send_message(
         message.chat.id,
-        "Assalomu alaykum! *Usta Express* botiga xush kelibsiz.\n\n"
-        "Ro'yxatdan o'tish uchun faqat pastdagi "
+        "Assalomu alaykum! *Master Go* botiga xush kelibsiz.\n\n"
+        "Ro'yxatdan o'tish uchun pastdagi "
         "📞 *Telefon raqamni yuborish* tugmasini bosing.\n\n"
         "🇺🇿 Faqat O'zbekiston telefon raqamlari qabul qilinadi.",
         parse_mode="Markdown",
@@ -61,46 +98,44 @@ def send_welcome(message):
 
 @bot.message_handler(content_types=["contact"])
 def handle_contact(message):
-    # Faqat Telegramdagi o'z kontaktini yuborishiga ruxsat.
-    # Boshqa odamning kontaktini yuborsa qabul qilinmaydi.
+
+    if not message.contact:
+        return
+
+    # Faqat o'zining kontaktini yuborishga ruxsat
+    contact_user_id = message.contact.user_id
+    sender_user_id = message.from_user.id
+
     if (
-        message.contact.user_id is not None
-        and message.contact.user_id != message.from_user.id
+        contact_user_id is not None
+        and contact_user_id != sender_user_id
     ):
         bot.send_message(
             message.chat.id,
-            "❌ Iltimos, o'zingizning telefon raqamingizni "
+            "❌ Boshqa odamning raqamini yuborish mumkin emas.\n\n"
+            "Iltimos, o'zingizning raqamingizni "
             "📞 *Telefon raqamni yuborish* tugmasi orqali yuboring.",
             parse_mode="Markdown",
         )
         return
 
-    phone = str(message.contact.phone_number or "").strip()
+    raw_phone = message.contact.phone_number
 
-    # Telegram odatda +998 formatida yuboradi.
-    # Faqat O'zbekiston: +998 + 9 ta raqam.
-    if not phone.startswith("+998"):
+    print(f"Telegram contact received: {raw_phone}")
+
+    phone = normalize_uz_phone(raw_phone)
+
+    if not phone:
+        print(f"Rejected phone number: {raw_phone}")
+
         bot.send_message(
             message.chat.id,
-            "❌ Faqat 🇺🇿 O'zbekiston telefon raqamlari qabul qilinadi.\n\n"
-            "Iltimos, 📞 *Telefon raqamni yuborish* tugmasini bosing.",
-            parse_mode="Markdown",
+            "❌ Bu O'zbekiston raqami emas yoki raqam noto'g'ri.\n\n"
+            "🇺🇿 Faqat +998XXXXXXXXX formatidagi raqamlar qabul qilinadi.",
         )
         return
 
-    # +998 dan keyin aynan 9 ta raqam bo'lishi kerak.
-    uz_phone_digits = phone[1:]
-
-    if len(uz_phone_digits) != 12 or not uz_phone_digits.isdigit():
-        bot.send_message(
-            message.chat.id,
-            "❌ Telefon raqami noto'g'ri.\n\n"
-            "Faqat 🇺🇿 O'zbekiston raqami qabul qilinadi.",
-        )
-        return
-
-    # +998XXXXXXXXX
-    normalized_phone = "+998" + uz_phone_digits[3:]
+    print(f"Accepted Uzbekistan phone: {phone}")
 
     chat_id = message.chat.id
 
@@ -115,7 +150,7 @@ def handle_contact(message):
     }
 
     data = {
-        "phone_number": normalized_phone,
+        "phone_number": phone,
         "telegram_chat_id": chat_id,
         "verification_code": code,
     }
@@ -128,27 +163,33 @@ def handle_contact(message):
             timeout=15,
         )
 
+        print(
+            f"Supabase response: {response.status_code} "
+            f"{response.text[:500]}"
+        )
+
         if response.status_code in (200, 201, 204):
-            bot.send_message(
-                chat_id,
-                f"Sizning tasdiqlash kodingiz: *{code}*",
-                parse_mode="Markdown",
-                reply_markup=types.ReplyKeyboardRemove(),
-            )
-        else:
-            print(
-                "Supabase error:",
-                response.status_code,
-                response.text,
-            )
 
             bot.send_message(
                 chat_id,
-                "❌ Bazaga yozishda xatolik yuz berdi. "
+                f"✅ Raqamingiz qabul qilindi.\n\n"
+                f"Sizning tasdiqlash kodingiz: *{code}* \n\n"
+                f"Kodning amal qilish muddati 2 daqiqa",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove(),
+            )
+
+        else:
+
+            bot.send_message(
+                chat_id,
+                "❌ Raqam qabul qilindi, lekin bazaga yozishda "
+                "xatolik yuz berdi.\n\n"
                 "Iltimos, keyinroq qayta urinib ko'ring.",
             )
 
     except requests.RequestException as error:
+
         print("Supabase connection error:", error)
 
         bot.send_message(
@@ -159,7 +200,7 @@ def handle_contact(message):
 
 
 # ============================================================
-# ALL OTHER TEXT / CONTACT TYPES
+# EVERYTHING ELSE IS REJECTED
 # ============================================================
 
 @bot.message_handler(
@@ -176,15 +217,11 @@ def handle_contact(message):
     ]
 )
 def reject_manual_input(message):
-    # Telefon raqamini qo'lda yozishni qabul qilmaymiz.
-    # Faqat Telegram contact tugmasi ishlaydi.
-    if message.text == "/start":
-        return
 
     bot.send_message(
         message.chat.id,
         "❌ Telefon raqamini qo'lda yozib yuborish mumkin emas.\n\n"
-        "Iltimos, 📞 *Telefon raqamni yuborish* tugmasini bosing.\n"
+        "📞 *Telefon raqamni yuborish* tugmasini bosing.\n"
         "🇺🇿 Faqat O'zbekiston raqamlari qabul qilinadi.",
         parse_mode="Markdown",
     )

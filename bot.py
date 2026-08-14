@@ -24,7 +24,20 @@ if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_KEY environment variable topilmadi.")
 
 
+
 bot = telebot.TeleBot(TOKEN)
+
+# Telegram numeric user ID of the administrator.
+# Railway Variables -> ADMIN_ID ga o'zingizning Telegram ID'ingizni yozing.
+ADMIN_ID = os.getenv("7782825299")
+
+if not ADMIN_ID:
+    raise RuntimeError("ADMIN_ID environment variable topilmadi.")
+
+ADMIN_ID = str(ADMIN_ID).strip()
+
+# Admin /broadcast buyrug'idan keyin keladigan xabarni kutish holati.
+broadcast_waiting = set()
 
 
 # ============================================================
@@ -61,6 +74,171 @@ def normalize_uz_phone(phone):
         return None
 
     return phone
+
+
+# ============================================================
+# BROADCAST
+# ============================================================
+
+def is_admin(message):
+    return str(message.from_user.id) == ADMIN_ID
+
+
+@bot.message_handler(commands=["broadcast"])
+def start_broadcast(message):
+    if not is_admin(message):
+        bot.send_message(
+            message.chat.id,
+            "❌ Sizda bu buyruqdan foydalanish huquqi yo'q.",
+        )
+        return
+
+    broadcast_waiting.add(message.from_user.id)
+
+    bot.send_message(
+        message.chat.id,
+        "📢 Reklama xabarini yuboring.\n\n"
+        "Hozircha faqat matnli xabar broadcast qilinadi.\n"
+        "Bekor qilish uchun /cancel yuboring.",
+    )
+
+
+@bot.message_handler(commands=["cancel"])
+def cancel_broadcast(message):
+    if not is_admin(message):
+        return
+
+    if message.from_user.id in broadcast_waiting:
+        broadcast_waiting.discard(message.from_user.id)
+        bot.send_message(
+            message.chat.id,
+            "✅ Broadcast bekor qilindi.",
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "Hozir faol broadcast yo'q.",
+        )
+
+
+@bot.message_handler(
+    func=lambda message: (
+        message.from_user is not None
+        and str(message.from_user.id) == ADMIN_ID
+        and message.from_user.id in broadcast_waiting
+        and message.content_type == "text"
+        and not (message.text or "").startswith("/")
+    )
+)
+def process_broadcast(message):
+    broadcast_waiting.discard(message.from_user.id)
+
+    advertisement = (message.text or "").strip()
+
+    if not advertisement:
+        bot.send_message(
+            message.chat.id,
+            "❌ Reklama matni bo'sh bo'lishi mumkin emas.",
+        )
+        return
+
+    # Foydalanuvchilarni Supabase users jadvalidan olamiz.
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/users"
+            "?select=telegram_chat_id"
+            "&telegram_chat_id=not.is.null",
+            headers=headers,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            print(
+                "Broadcast users query error:",
+                response.status_code,
+                response.text[:1000],
+            )
+            bot.send_message(
+                message.chat.id,
+                "❌ Foydalanuvchilarni olishda xatolik yuz berdi.",
+            )
+            return
+
+        rows = response.json()
+
+    except requests.RequestException as error:
+        print("Broadcast users connection error:", error)
+        bot.send_message(
+            message.chat.id,
+            "❌ Server bilan bog'lanishda xatolik yuz berdi.",
+        )
+        return
+
+    chat_ids = []
+    seen = set()
+
+    for row in rows:
+        chat_id = row.get("telegram_chat_id")
+
+        if chat_id is None:
+            continue
+
+        chat_id = str(chat_id).strip()
+
+        if not chat_id or chat_id in seen:
+            continue
+
+        seen.add(chat_id)
+        chat_ids.append(chat_id)
+
+    sent = 0
+    failed = 0
+    blocked = 0
+
+    bot.send_message(
+        message.chat.id,
+        f"📢 Broadcast boshlandi.\n"
+        f"👥 Jami: {len(chat_ids)} ta foydalanuvchi.",
+    )
+
+    for chat_id in chat_ids:
+        try:
+            bot.send_message(
+                chat_id,
+                advertisement,
+            )
+            sent += 1
+
+        except Exception as error:
+            failed += 1
+
+            error_text = str(error).lower()
+
+            if (
+                "blocked by the user" in error_text
+                or "chat not found" in error_text
+                or "user is deactivated" in error_text
+            ):
+                blocked += 1
+
+            print(
+                f"Broadcast failed for chat_id={chat_id}: {error}"
+            )
+
+    bot.send_message(
+        message.chat.id,
+        "✅ Broadcast tugadi.\n\n"
+        f"📨 Yuborildi: {sent}\n"
+        f"❌ Xato: {failed}\n"
+        f"🚫 Bloklangan/topilmagan: {blocked}\n"
+        f"👥 Jami: {len(chat_ids)}",
+    )
 
 
 # ============================================================
